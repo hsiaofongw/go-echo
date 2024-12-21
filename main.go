@@ -97,8 +97,8 @@ func handleClient(cli net.Conn, stats *ConnStats) {
 		cli.Close()
 	}()
 
-	readEnd := make(chan bool)
-	go func(done chan bool) {
+	done := make(chan bool)
+	go func() {
 
 		defer func() {
 			close(usage)
@@ -126,9 +126,9 @@ func handleClient(cli net.Conn, stats *ConnStats) {
 
 			}
 		}
-	}(readEnd)
+	}()
 
-	<-readEnd
+	<-done
 }
 
 func main() {
