@@ -15,9 +15,6 @@ type MeterRecord struct {
 	/** Meter */
 	meter float64
 
-	/** Duration, how long passed since t[0] */
-	duration int64
-
 	/** Average speed */
 	avg float64
 
@@ -47,7 +44,6 @@ func (mt *SpeedMeter) Start() {
 	record := MeterRecord{
 		instant:      time.Now().UnixNano(),
 		meter:        0,
-		duration:     0,
 		avg:          0,
 		instantSpeed: 0,
 		maxSpeed:     0,
@@ -79,7 +75,6 @@ func (mt *SpeedMeter) Track(meter float64) {
 	// As for integer n > 0:
 	// t[n] is exactly NOW, how long in has been since the unix epoch, in nanoseconds, one nanosecond is 10^-9 second.
 	// m[n] is given as the arugument use to call this function (`meter float64`).
-	// d[n] := t[n]-t[n-1]
 	// a[n] := (m[n]-m[0])/(t[n]-t[0])
 	// v[n] := (m[n]-m[n-1])/(t[n]-t[n-1])
 	// Y[n] := max(v[n], Y[n-1])
@@ -94,7 +89,6 @@ func (mt *SpeedMeter) Track(meter float64) {
 	mt.Records[idx].instant = tn
 	m0 := mt.Records[0].meter
 	mt.Records[idx].meter = meter
-	mt.Records[idx].duration = tn - t0
 	mt.Records[idx].avg = (meter - m0) / float64(tn-t0)
 	m_prev := mt.Records[prevIdx].meter
 	t_prev := mt.Records[prevIdx].instant
