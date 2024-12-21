@@ -38,7 +38,7 @@ type SpeedMeter struct {
 
 func NewSpeedMeter() *SpeedMeter {
 	mt := new(SpeedMeter)
-	mt.Records = make([]MeterRecord, 2)
+	mt.Records = make([]MeterRecord, 3)
 	mt.N = 0
 	return mt
 }
@@ -109,13 +109,18 @@ func (mt *SpeedMeter) GetCurrentSpeed() float64 {
 	return mt.Records[idx].instantSpeed
 }
 
+func (mt *SpeedMeter) GetAVGSpeed() float64 {
+	idx := 1 + (mt.N % 2)
+	return mt.Records[idx].avg
+}
+
 type RateLimitConfig struct {
 	NumSlots      int
 	ChunkSize     int
 	SleepInterval time.Duration
 }
 
-const numRLSlots int = 10
+const numRLSlots int = 1
 const numRLChunSize int = 1 << 12
 const numRLSleepIntervalMS int64 = 100
 const defaultBufSize int = 1 << 10
@@ -132,7 +137,7 @@ func GetRateLimitConfig(config *RateLimitConfig) *RateLimitConfig {
 
 // returns rate limit in unit of bytes per second
 func GetTheoreticalRateLimit(config *RateLimitConfig) float64 {
-	return float64(config.ChunkSize) * float64(config.SleepInterval/time.Second)
+	return float64(config.ChunkSize) * float64(time.Second/config.SleepInterval)
 }
 
 func RunRateLimitChannel(ctx context.Context, config *RateLimitConfig, usage chan int) {
@@ -243,7 +248,7 @@ func handleClient(cli net.Conn, stats *ConnStats, rlConfig *RateLimitConfig) {
 
 				accum += n
 				spdMeter.Track(float64(accum))
-				log.Printf("Wrote back chunk of %d bytes size to the peer %s, speed: %.6f, theoretical speed: %.6f\n", n, remoteAddr, spdMeter.GetCurrentSpeed(), theoretical)
+				log.Printf("Wrote back chunk of %d bytes size to the peer %s, speed: %.6f, theoretical speed: %.6f\n", n, remoteAddr, spdMeter.GetAVGSpeed(), theoretical)
 
 			}
 		}
