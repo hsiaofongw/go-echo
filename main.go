@@ -84,6 +84,8 @@ func (mt *SpeedMeter) Track(meter float64) {
 	// v[n] := (m[n]-m[n-1])/(t[n]-t[n-1])
 	// Y[n] := max(v[n], Y[n-1])
 
+	meter = meter * math.Pow10(9)
+
 	mt.N++
 	prevIdx := 1 + ((mt.N - 1) % 2)
 	idx := 1 + (mt.N % 2)
@@ -99,6 +101,12 @@ func (mt *SpeedMeter) Track(meter float64) {
 	spd := (meter - m_prev) / float64(tn-t_prev)
 	mt.Records[idx].instantSpeed = spd
 	mt.Records[idx].maxSpeed = math.Max(spd, mt.Records[prevIdx].maxSpeed)
+}
+
+/** Returns speed in (m/s), because we already multiplied the meter by 10^9 in `Track()` */
+func (mt *SpeedMeter) GetCurrentSpeed() float64 {
+	idx := 1 + (mt.N % 2)
+	return mt.Records[idx].instantSpeed
 }
 
 type RateLimitConfig struct {
@@ -117,14 +125,14 @@ func GetRateLimitConfig(config *RateLimitConfig) *RateLimitConfig {
 		config = new(RateLimitConfig)
 		config.NumSlots = numRLSlots
 		config.ChunkSize = numRLChunSize
-		config.SleepInterval = time.Duration(numRLSleepIntervalMS * 1000000)
+		config.SleepInterval = time.Duration(time.Duration(numRLSleepIntervalMS) * time.Millisecond)
 	}
 	return config
 }
 
 // returns rate limit in unit of bytes per second
-func GetTheoreticalRateLimit() float64 {
-	return float64(numRLChunSize) * float64(time.Second.Milliseconds()) / float64(numRLSleepIntervalMS)
+func GetTheoreticalRateLimit(config *RateLimitConfig) float64 {
+	return float64(config.ChunkSize) * float64(config.SleepInterval/time.Second)
 }
 
 func RunRateLimitChannel(ctx context.Context, config *RateLimitConfig, usage chan int) {
@@ -208,6 +216,12 @@ func handleClient(cli net.Conn, stats *ConnStats, rlConfig *RateLimitConfig) {
 		}()
 
 		tempBuf := make([]byte, defaultBufSize)
+		spdMeter := NewSpeedMeter()
+		spdMeter.Start()
+
+		theoretical := GetTheoreticalRateLimit(rlConfig)
+
+		accum := 0
 		for {
 			n, err := cli.Read(tempBuf)
 			if err != nil {
@@ -218,6 +232,7 @@ func handleClient(cli net.Conn, stats *ConnStats, rlConfig *RateLimitConfig) {
 			usage <- n
 
 			log.Printf("Got chunk of %d bytes size from peer %s\n", n, remoteAddr)
+
 			if n > 0 {
 
 				n, err := cli.Write(tempBuf[0:n])
@@ -226,7 +241,9 @@ func handleClient(cli net.Conn, stats *ConnStats, rlConfig *RateLimitConfig) {
 					return
 				}
 
-				log.Printf("Wrote back chunk of %d bytes size to the peer %s\n", n, remoteAddr)
+				accum += n
+				spdMeter.Track(float64(accum))
+				log.Printf("Wrote back chunk of %d bytes size to the peer %s, speed: %.6f, theoretical speed: %.6f\n", n, remoteAddr, spdMeter.GetCurrentSpeed(), theoretical)
 
 			}
 		}
