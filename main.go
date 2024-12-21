@@ -2,221 +2,77 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
-	"math"
 	"net"
 	"time"
 )
 
-func makeRateLimitChannel(ctx context.Context, numSlots int, chunkSize int, sleepIntervalMs int64, traceId *int) <-chan int {
-	rateLimitChan := make(chan int, numSlots)
+type RateLimitConfig struct {
+	NumSlots      int
+	ChunkSize     int
+	SleepInterval time.Duration
+}
 
-	if traceId != nil {
-		log.Printf("Pre-loading rate limiter #%d.\n", *traceId)
-	}
-	for i := 0; i < numSlots; i++ {
-		rateLimitChan <- chunkSize
-	}
-	if traceId != nil {
-		log.Printf("Rate limiter #%d is fully-loaded.\n", *traceId)
+const numRLSlots int = 10
+const numRLChunSize int = 1 << 3
+const numRLSleepIntervalMS int64 = 400
+const defaultBufSize int = 1 << 10
+
+func RunRateLimitChannel(ctx context.Context, config *RateLimitConfig, usage chan int) {
+	if config == nil {
+		config = new(RateLimitConfig)
+		config.NumSlots = numRLChunSize
+		config.ChunkSize = numRLChunSize
+		config.SleepInterval = time.Duration(numRLSleepIntervalMS * 1000000)
 	}
 
-	go func(ctx context.Context, c chan int) {
-		if traceId != nil {
-			log.Printf("Rate limiter #%d is launched.\n", *traceId)
-		}
+	rl := make(chan int, config.NumSlots)
 
-		defer func() {
-			if traceId != nil {
-				log.Printf("Rate limiter #%d is closed.\n", *traceId)
-			}
-		}()
+	for i := 0; i < cap(rl); i++ {
+		rl <- config.ChunkSize
+	}
+
+	go func() {
+		ticker := time.NewTicker(config.SleepInterval)
+		defer ticker.Stop()
 
 		for {
 			select {
-			case c <- chunkSize:
-				if traceId != nil {
-					log.Printf("Rate limiter #%d just loaded chunk of size %d bytes and will sleep for %d milliseconds.\n", *traceId, chunkSize, sleepIntervalMs)
-				}
-				time.Sleep(time.Duration(sleepIntervalMs * int64(math.Pow10(6))))
 			case <-ctx.Done():
-				if traceId != nil {
-					log.Printf("Rate limiter #%d received exit signal and is about to return.\n", *traceId)
-				}
-				close(c)
 				return
+			case _, ok := <-ticker.C:
+				if !ok {
+					return
+				}
+
+				if len(rl) < cap(rl) {
+					rl <- config.ChunkSize
+				}
 			}
 		}
 
-	}(ctx, rateLimitChan)
+	}()
 
-	return rateLimitChan
+	go func() {
+		var quota int = 0
+		for {
+			chunkSize, ok := <-usage
+			if !ok {
+				return
+			}
+
+			for quota < chunkSize {
+				quota += <-rl
+			}
+
+			quota -= chunkSize
+		}
+	}()
 }
 
 type ConnStats struct {
 	track map[string]bool
-}
-
-/** A simple circular buffer struct */
-type CircularBuffer struct {
-	/** Buffer that actually holding the data */
-	buf []byte
-
-	/** Where should be read from, and (offset + size) % len(buf) is where should be write from. */
-	offset int
-
-	/** Number of bytes that are currently holding in this circular buffer */
-	size int
-
-	/** Emits when one can immediately get some data from here without blocking.  */
-	onData chan bool
-
-	/** Emits when one can immediately write some data to here without blocking. */
-	onFreeCapacity chan bool
-}
-
-func makeCircularBuffer(cap int) *CircularBuffer {
-	circBuf := new(CircularBuffer)
-	circBuf.buf = make([]byte, cap)
-	circBuf.offset = 0
-	circBuf.size = 0
-	circBuf.onData = make(chan bool)
-	circBuf.onFreeCapacity = make(chan bool)
-	return circBuf
-}
-
-func (circBuf *CircularBuffer) Capacity() int {
-	return len(circBuf.buf)
-}
-
-func (circBuf *CircularBuffer) Size() int {
-	return circBuf.size
-}
-
-func (circBuf *CircularBuffer) FreeCapacity() int {
-	return len(circBuf.buf) - circBuf.size
-}
-
-func smaller(a, b int) int {
-	if b < a {
-		a = b
-	}
-
-	return a
-}
-
-func (circBuf *CircularBuffer) WriteUnsafe(data []byte, offset, limit int) int {
-	dstBegin := (circBuf.offset + circBuf.size) % len(circBuf.buf)
-
-	bytesToCopy := smaller(smaller(limit, circBuf.FreeCapacity()), len(circBuf.buf)-dstBegin)
-
-	dstEnd := smaller(dstBegin+bytesToCopy, len(circBuf.buf))
-
-	srcBegin := offset
-	srcEnd := srcBegin + bytesToCopy
-
-	n := copy(circBuf.buf[dstBegin:dstEnd], data[srcBegin:srcEnd])
-	log.Printf("Copyied chunk of %d bytes size: from data[%d:%d] to circBuf[%d:%d]", n, srcBegin, srcEnd, dstBegin, dstEnd)
-
-	circBuf.size += n
-	return n
-}
-
-/** Send data to this circular buffer, data[offset:(offset+limit)] would be actually sent, returns how many bytes actually sent. */
-func (circBuf *CircularBuffer) Send(ctx context.Context, data []byte, offset, limit int) int {
-	bytesSent := 0
-	for bytesSent < limit {
-		select {
-		case <-ctx.Done():
-			return bytesSent
-		default:
-			cap := circBuf.FreeCapacity()
-			if cap == 0 {
-				<-circBuf.onFreeCapacity
-				continue
-			}
-
-			bytesSent += circBuf.WriteUnsafe(data, offset+bytesSent, smaller(limit-bytesSent, cap))
-		}
-	}
-
-	return bytesSent
-}
-
-/** Receive some data from this circular buffer, returns how many bytes actually got. */
-func (circBuf *CircularBuffer) Receive(ctx context.Context, data []byte, offset, limit int) int {
-	bytesReceived := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return bytesReceived
-		}
-	}
-}
-
-func doRead(rateLimit <-chan int, circBuf *CircularBuffer, cli net.Conn) <-chan bool {
-	finish := make(chan bool)
-
-	go func(done chan bool) {
-		sendCtx, cancelSend := context.WithCancel(context.Background())
-		defer func() {
-			cancelSend()
-			done <- true
-		}()
-
-		tempBuf := make([]byte, circBuf.Capacity())
-		for {
-			chunkSize, ok := <-rateLimit
-			if !ok {
-				return
-			}
-
-			n, err := cli.Read(tempBuf[0:chunkSize])
-			if err != nil {
-				return
-			}
-
-			log.Printf("Got %d bytes from %s\n", n, cli.RemoteAddr().String())
-
-			circBuf.Send(sendCtx, tempBuf, 0, n)
-		}
-
-	}(finish)
-
-	return finish
-}
-
-func doWrite(rateLimit <-chan int, circBuf *CircularBuffer, cli net.Conn) <-chan bool {
-	finish := make(chan bool)
-
-	go func(done chan bool) {
-		receiveCtx, cancelReceive := context.WithCancel(context.Background())
-		defer func() {
-			cancelReceive()
-			done <- true
-		}()
-
-		tempBuf := make([]byte, circBuf.Capacity())
-		for {
-
-			chunkSize, ok := <-rateLimit
-			if !ok {
-				return
-			}
-
-			n := circBuf.Receive(receiveCtx, tempBuf, 0, chunkSize)
-
-			n, err := cli.Write(tempBuf[0:n])
-			if err != nil {
-				return
-			}
-
-			log.Printf("Wrote %d bytes to %s\n", n, cli.RemoteAddr().String())
-		}
-
-	}(finish)
-
-	return finish
 }
 
 func handleClient(cli net.Conn, stats *ConnStats) {
@@ -224,41 +80,55 @@ func handleClient(cli net.Conn, stats *ConnStats) {
 		log.Fatalln("Don't call handleClient with nil ConnStats.")
 	}
 
-	const numRLSlots int = 10
-	const numRLChunSize int = 1 << 2
-	const numRLSleepIntervalMS int64 = 100
-
 	remoteAddr := cli.RemoteAddr().String()
-	readTraceId := len(stats.track) << 1
-	writeTraceId := readTraceId + 1
-	log.Println("Got new connection:", remoteAddr, "readTraceId", readTraceId, "writeTraceId", writeTraceId)
+	traceId := len(stats.track)
+	log.Println("Got new connection:", remoteAddr, "traceId", traceId)
 	stats.track[remoteAddr] = true
 
-	readCtx, cancelRead := context.WithCancel(context.Background())
-	readRateLimit := makeRateLimitChannel(readCtx, numRLSlots, numRLChunSize, numRLSleepIntervalMS, &readTraceId)
-	writeCtx, cancelWrite := context.WithCancel(context.Background())
-	writeRateLimit := makeRateLimitChannel(writeCtx, numRLSlots, numRLChunSize, numRLSleepIntervalMS, &writeTraceId)
+	var rlConfig *RateLimitConfig = nil
+
+	rechargingCtx, cancalRecharging := context.WithCancel(context.Background())
+	usage := make(chan int)
+	RunRateLimitChannel(rechargingCtx, rlConfig, usage)
 
 	defer func() {
 		log.Println(remoteAddr, "closed")
-		cancelRead()
-		cancelWrite()
+		cancalRecharging()
 		cli.Close()
 	}()
 
-	bufSize := numRLChunSize << 2
-	circBuf := makeCircularBuffer(bufSize)
-	log.Println("Buffer len is", circBuf.Capacity(), "bytes")
+	readEnd := make(chan bool)
+	go func(done chan bool) {
 
-	readFinish := doRead(readRateLimit, circBuf, cli)
-	writeFinish := doWrite(writeRateLimit, circBuf, cli)
+		defer func() {
+			close(usage)
+			done <- true
+		}()
 
-	select {
-	case <-readFinish:
-		return
-	case <-writeFinish:
-		return
-	}
+		tempBuf := make([]byte, defaultBufSize)
+		for {
+			n, err := cli.Read(tempBuf)
+			if err != nil {
+				fmt.Printf("Peer %s read end closed.\n", remoteAddr)
+				return
+			}
+
+			fmt.Printf("Got chunk of %d bytes size from peer %s\n", n, remoteAddr)
+			if n > 0 {
+
+				n, err := cli.Write(tempBuf[0:n])
+				if err != nil {
+					fmt.Printf("Peer %s write end closed.\n", remoteAddr)
+					return
+				}
+
+				fmt.Printf("Wrote back chunk of %d bytes size to the peer %s\n", n, remoteAddr)
+
+			}
+		}
+	}(readEnd)
+
+	<-readEnd
 }
 
 func main() {
