@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net"
 	"time"
@@ -15,14 +14,14 @@ type RateLimitConfig struct {
 }
 
 const numRLSlots int = 10
-const numRLChunSize int = 1 << 3
-const numRLSleepIntervalMS int64 = 400
+const numRLChunSize int = 1 << 12
+const numRLSleepIntervalMS int64 = 100
 const defaultBufSize int = 1 << 10
 
 func RunRateLimitChannel(ctx context.Context, config *RateLimitConfig, usage chan int) {
 	if config == nil {
 		config = new(RateLimitConfig)
-		config.NumSlots = numRLChunSize
+		config.NumSlots = numRLSlots
 		config.ChunkSize = numRLChunSize
 		config.SleepInterval = time.Duration(numRLSleepIntervalMS * 1000000)
 	}
@@ -109,20 +108,22 @@ func handleClient(cli net.Conn, stats *ConnStats) {
 		for {
 			n, err := cli.Read(tempBuf)
 			if err != nil {
-				fmt.Printf("Peer %s read end closed.\n", remoteAddr)
+				log.Printf("Peer %s read end closed.\n", remoteAddr)
 				return
 			}
 
-			fmt.Printf("Got chunk of %d bytes size from peer %s\n", n, remoteAddr)
+			usage <- n
+
+			log.Printf("Got chunk of %d bytes size from peer %s\n", n, remoteAddr)
 			if n > 0 {
 
 				n, err := cli.Write(tempBuf[0:n])
 				if err != nil {
-					fmt.Printf("Peer %s write end closed.\n", remoteAddr)
+					log.Printf("Peer %s write end closed.\n", remoteAddr)
 					return
 				}
 
-				fmt.Printf("Wrote back chunk of %d bytes size to the peer %s\n", n, remoteAddr)
+				log.Printf("Wrote back chunk of %d bytes size to the peer %s\n", n, remoteAddr)
 
 			}
 		}
